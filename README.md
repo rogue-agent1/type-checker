@@ -1,13 +1,11 @@
-# Type Checker
+# type-checker
 
-Simple type checker for a mini language.
+Hindley-Milner type inference engine.
+
+Zero dependencies. Python 3.8+.
 
 ## Usage
 
 ```bash
-python3 type_checker.py
+python3 type_checker.py --help
 ```
-
-## License
-
-MIT
