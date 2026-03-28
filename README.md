@@ -1,11 +1,13 @@
-# type-checker
+# Type Checker
 
-Type checker for a simple typed lambda calculus
+Simple type checker for a mini language.
 
 ## Usage
 
 ```bash
-python3 type_checker.py --help
+python3 type_checker.py
 ```
 
-Zero dependencies. Python 3.8+.
+## License
+
+MIT
