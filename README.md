@@ -1,11 +1,9 @@
-# type-checker
+# Type Checker (Hindley-Milner)
 
-Hindley-Milner type inference engine.
-
-Zero dependencies. Python 3.8+.
+Type Checker (Hindley-Milner) — zero-dependency Python implementation.
 
 ## Usage
 
 ```bash
-python3 type_checker.py --help
+python3 type_checker.py
 ```

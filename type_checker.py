@@ -1,101 +1,79 @@
 #!/usr/bin/env python3
-"""type_checker - Hindley-Milner type inference."""
-import argparse
+"""Hindley-Milner type inference for a simple lambda calculus."""
+import sys
 
-class Type:
-    pass
-
-class TVar(Type):
-    _counter = 0
+class TVar:
+    _id = 0
     def __init__(self, name=None):
-        if name is None: TVar._counter += 1; name = f"t{TVar._counter}"
-        self.name = name
-    def __repr__(self): return self.name
+        if name is None: TVar._id += 1; name = f"t{TVar._id}"
+        self.name = name; self.instance = None
+    def __repr__(self): return self.name if not self.instance else repr(self.instance)
 
-class TCon(Type):
-    def __init__(self, name, args=None):
-        self.name = name; self.args = args or []
+class TCon:
+    def __init__(self, name, args=None): self.name = name; self.args = args or []
     def __repr__(self):
         if not self.args: return self.name
         if self.name == "->": return f"({self.args[0]} -> {self.args[1]})"
         return f"{self.name}[{', '.join(map(str, self.args))}]"
 
-INT = TCon("Int"); BOOL = TCon("Bool"); STR = TCon("String")
-def FUN(a, b): return TCon("->", [a, b])
+Int = TCon("Int"); Bool = TCon("Bool"); String = TCon("String")
+def Arrow(a, b): return TCon("->", [a, b])
 
-def occurs_in(tvar, typ):
-    if isinstance(typ, TVar): return tvar.name == typ.name
-    if isinstance(typ, TCon): return any(occurs_in(tvar, a) for a in typ.args)
-    return False
+def prune(t):
+    if isinstance(t, TVar) and t.instance: t.instance = prune(t.instance); return t.instance
+    return t
 
-def unify(t1, t2, subst):
-    t1, t2 = apply_subst(subst, t1), apply_subst(subst, t2)
-    if isinstance(t1, TVar):
-        if isinstance(t2, TVar) and t1.name == t2.name: return subst
-        if occurs_in(t1, t2): raise TypeError(f"Infinite type: {t1} in {t2}")
-        return {**subst, t1.name: t2}
-    if isinstance(t2, TVar): return unify(t2, t1, subst)
+def unify(t1, t2):
+    t1, t2 = prune(t1), prune(t2)
+    if isinstance(t1, TVar): t1.instance = t2; return
+    if isinstance(t2, TVar): t2.instance = t1; return
     if isinstance(t1, TCon) and isinstance(t2, TCon):
         if t1.name != t2.name or len(t1.args) != len(t2.args):
             raise TypeError(f"Cannot unify {t1} with {t2}")
-        for a1, a2 in zip(t1.args, t2.args): subst = unify(a1, a2, subst)
-        return subst
-    raise TypeError(f"Cannot unify {t1} with {t2}")
+        for a, b in zip(t1.args, t2.args): unify(a, b)
 
-def apply_subst(subst, typ):
-    if isinstance(typ, TVar): return apply_subst(subst, subst[typ.name]) if typ.name in subst else typ
-    if isinstance(typ, TCon): return TCon(typ.name, [apply_subst(subst, a) for a in typ.args])
-    return typ
-
-def infer(expr, env, subst):
-    if isinstance(expr, int): return INT, subst
-    if isinstance(expr, bool): return BOOL, subst
+def infer(expr, env):
+    if isinstance(expr, int): return Int
+    if isinstance(expr, bool): return Bool
     if isinstance(expr, str):
-        if expr in env: return env[expr], subst
-        raise TypeError(f"Unbound: {expr}")
+        if expr in env: return env[expr]
+        raise NameError(f"Undefined: {expr}")
     if isinstance(expr, tuple):
-        if expr[0] == "let":
-            _, name, val, body = expr
-            val_t, subst = infer(val, env, subst)
-            return infer(body, {**env, name: val_t}, subst)
         if expr[0] == "lambda":
             _, param, body = expr
-            param_t = TVar()
-            body_t, subst = infer(body, {**env, param: param_t}, subst)
-            return FUN(apply_subst(subst, param_t), body_t), subst
+            param_type = TVar(); new_env = {**env, param: param_type}
+            body_type = infer(body, new_env)
+            return Arrow(param_type, body_type)
+        if expr[0] == "let":
+            _, name, value, body = expr
+            val_type = infer(value, env)
+            return infer(body, {**env, name: val_type})
         if expr[0] == "if":
-            _, cond, then, els = expr
-            cond_t, subst = infer(cond, env, subst)
-            subst = unify(cond_t, BOOL, subst)
-            then_t, subst = infer(then, env, subst)
-            else_t, subst = infer(els, env, subst)
-            subst = unify(then_t, else_t, subst)
-            return apply_subst(subst, then_t), subst
-        func, arg = expr
-        func_t, subst = infer(func, env, subst)
-        arg_t, subst = infer(arg, env, subst)
-        ret_t = TVar()
-        subst = unify(func_t, FUN(arg_t, ret_t), subst)
-        return apply_subst(subst, ret_t), subst
+            _, cond, then, else_ = expr
+            unify(infer(cond, env), Bool)
+            then_t = infer(then, env); else_t = infer(else_, env)
+            unify(then_t, else_t); return then_t
+        # Application
+        fn, arg = expr
+        fn_type = infer(fn, env); arg_type = infer(arg, env)
+        result_type = TVar()
+        unify(fn_type, Arrow(arg_type, result_type))
+        return prune(result_type)
 
 def main():
-    p = argparse.ArgumentParser(description="Type inference demo")
-    p.add_argument("--demo", action="store_true")
-    args = p.parse_args()
-    env = {"+": FUN(INT, FUN(INT, INT)), "not": FUN(BOOL, BOOL), "==": FUN(INT, FUN(INT, BOOL))}
-    examples = [
-        ("42", 42),
-        ("true", True),
-        ("identity", ("lambda", "x", "x")),
-        ("let", ("let", "f", ("lambda", "x", ("+", "x")), ("f", 5))),
-        ("if", ("if", True, 1, 2)),
+    env = {"+": Arrow(Int, Arrow(Int, Int)), "==": Arrow(Int, Arrow(Int, Bool)),
+           "not": Arrow(Bool, Bool)}
+    tests = [
+        42, True,
+        ("lambda", "x", ("+", "x")),
+        ("let", "id", ("lambda", "x", "x"), ("id", 42)),
+        ("if", True, 1, 2),
     ]
-    for name, expr in examples:
+    for expr in tests:
+        TVar._id = 0
         try:
-            t, _ = infer(expr, env, {})
-            print(f"  {name}: {t}")
-        except TypeError as e:
-            print(f"  {name}: Error: {e}")
+            t = infer(expr, env)
+            print(f"  {expr!r:40s} : {prune(t)}")
+        except Exception as e: print(f"  {expr!r:40s} : ERROR {e}")
 
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__": main()
