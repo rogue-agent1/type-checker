@@ -1,79 +1,111 @@
 #!/usr/bin/env python3
-"""Hindley-Milner type inference for a simple lambda calculus."""
+"""Simple type checker for a mini typed language."""
 import sys
 
-class TVar:
-    _id = 0
-    def __init__(self, name=None):
-        if name is None: TVar._id += 1; name = f"t{TVar._id}"
-        self.name = name; self.instance = None
-    def __repr__(self): return self.name if not self.instance else repr(self.instance)
-
-class TCon:
-    def __init__(self, name, args=None): self.name = name; self.args = args or []
+class Type:
+    def __init__(self, name, params=None): self.name = name; self.params = params or []
+    def __eq__(self, o): return isinstance(o, Type) and self.name == o.name and self.params == o.params
     def __repr__(self):
-        if not self.args: return self.name
-        if self.name == "->": return f"({self.args[0]} -> {self.args[1]})"
-        return f"{self.name}[{', '.join(map(str, self.args))}]"
+        if self.name == "->": return f"({self.params[0]} -> {self.params[1]})"
+        if self.params: return f"{self.name}<{', '.join(map(str, self.params))}>"
+        return self.name
 
-Int = TCon("Int"); Bool = TCon("Bool"); String = TCon("String")
-def Arrow(a, b): return TCon("->", [a, b])
+INT = Type("Int"); FLOAT = Type("Float"); BOOL = Type("Bool"); STRING = Type("String"); VOID = Type("Void")
 
-def prune(t):
-    if isinstance(t, TVar) and t.instance: t.instance = prune(t.instance); return t.instance
-    return t
+def fn_type(a, b): return Type("->", [a, b])
 
-def unify(t1, t2):
-    t1, t2 = prune(t1), prune(t2)
-    if isinstance(t1, TVar): t1.instance = t2; return
-    if isinstance(t2, TVar): t2.instance = t1; return
-    if isinstance(t1, TCon) and isinstance(t2, TCon):
-        if t1.name != t2.name or len(t1.args) != len(t2.args):
-            raise TypeError(f"Cannot unify {t1} with {t2}")
-        for a, b in zip(t1.args, t2.args): unify(a, b)
+class TypeEnv:
+    def __init__(self, parent=None): self.bindings = {}; self.parent = parent
+    def bind(self, name, t): self.bindings[name] = t
+    def lookup(self, name):
+        if name in self.bindings: return self.bindings[name]
+        if self.parent: return self.parent.lookup(name)
+        raise TypeError(f"Unbound: {name}")
+    def child(self): return TypeEnv(self)
 
-def infer(expr, env):
-    if isinstance(expr, int): return Int
-    if isinstance(expr, bool): return Bool
-    if isinstance(expr, str):
-        if expr in env: return env[expr]
-        raise NameError(f"Undefined: {expr}")
-    if isinstance(expr, tuple):
-        if expr[0] == "lambda":
-            _, param, body = expr
-            param_type = TVar(); new_env = {**env, param: param_type}
-            body_type = infer(body, new_env)
-            return Arrow(param_type, body_type)
-        if expr[0] == "let":
-            _, name, value, body = expr
-            val_type = infer(value, env)
-            return infer(body, {**env, name: val_type})
-        if expr[0] == "if":
-            _, cond, then, else_ = expr
-            unify(infer(cond, env), Bool)
-            then_t = infer(then, env); else_t = infer(else_, env)
-            unify(then_t, else_t); return then_t
-        # Application
-        fn, arg = expr
-        fn_type = infer(fn, env); arg_type = infer(arg, env)
-        result_type = TVar()
-        unify(fn_type, Arrow(arg_type, result_type))
-        return prune(result_type)
+def check(expr, env):
+    if isinstance(expr, int): return INT
+    if isinstance(expr, float): return FLOAT
+    if isinstance(expr, bool): return BOOL
+    if isinstance(expr, str) and expr.startswith('"'): return STRING
+    if isinstance(expr, str): return env.lookup(expr)
+    if not isinstance(expr, list) or not expr: raise TypeError(f"Bad expr: {expr}")
+    head = expr[0]
+    if head == "let":
+        name, val_expr, body = expr[1], expr[2], expr[3]
+        val_type = check(val_expr, env)
+        new_env = env.child(); new_env.bind(name, val_type)
+        return check(body, new_env)
+    if head == "lambda":
+        param, param_type_str, body = expr[1], expr[2], expr[3]
+        param_type = parse_type(param_type_str)
+        new_env = env.child(); new_env.bind(param, param_type)
+        ret_type = check(body, new_env)
+        return fn_type(param_type, ret_type)
+    if head == "if":
+        cond_t = check(expr[1], env)
+        if cond_t != BOOL: raise TypeError(f"If condition must be Bool, got {cond_t}")
+        then_t = check(expr[2], env)
+        else_t = check(expr[3], env)
+        if then_t != else_t: raise TypeError(f"Branch mismatch: {then_t} vs {else_t}")
+        return then_t
+    if head in ("+", "-", "*", "/"):
+        lt, rt = check(expr[1], env), check(expr[2], env)
+        if lt == INT and rt == INT: return INT
+        if lt in (INT, FLOAT) and rt in (INT, FLOAT): return FLOAT
+        raise TypeError(f"Arithmetic on {lt}, {rt}")
+    if head in ("==", "!=", "<", ">", "<=", ">="):
+        check(expr[1], env); check(expr[2], env); return BOOL
+    if head in ("and", "or"):
+        lt, rt = check(expr[1], env), check(expr[2], env)
+        if lt != BOOL or rt != BOOL: raise TypeError(f"Logic on {lt}, {rt}")
+        return BOOL
+    if head == "not":
+        t = check(expr[1], env)
+        if t != BOOL: raise TypeError(f"Not on {t}")
+        return BOOL
+    # Function application
+    fn_t = check(expr[0], env)
+    if fn_t.name != "->": raise TypeError(f"Not a function: {fn_t}")
+    arg_t = check(expr[1], env)
+    if arg_t != fn_t.params[0]: raise TypeError(f"Expected {fn_t.params[0]}, got {arg_t}")
+    return fn_t.params[1]
+
+def parse_type(s):
+    s = s.strip()
+    if s == "Int": return INT
+    if s == "Float": return FLOAT
+    if s == "Bool": return BOOL
+    if s == "String": return STRING
+    if "->" in s:
+        parts = s.split("->", 1)
+        return fn_type(parse_type(parts[0]), parse_type(parts[1]))
+    return Type(s)
+
+def parse_expr(s):
+    import json
+    return json.loads(s)
 
 def main():
-    env = {"+": Arrow(Int, Arrow(Int, Int)), "==": Arrow(Int, Arrow(Int, Bool)),
-           "not": Arrow(Bool, Bool)}
-    tests = [
-        42, True,
-        ("lambda", "x", ("+", "x")),
-        ("let", "id", ("lambda", "x", "x"), ("id", 42)),
-        ("if", True, 1, 2),
-    ]
-    for expr in tests:
-        TVar._id = 0
+    env = TypeEnv()
+    env.bind("print", fn_type(STRING, VOID))
+    env.bind("toString", fn_type(INT, STRING))
+    if len(sys.argv) > 1:
+        expr = parse_expr(" ".join(sys.argv[1:]))
         try:
-            t = infer(expr, env)
-            print(f"  {expr!r:40s} : {prune(t)}")
-        except Exception as e: print(f"  {expr!r:40s} : ERROR {e}")
+            t = check(expr, env)
+            print(f"Type: {t}")
+        except TypeError as e: print(f"Type error: {e}", file=sys.stderr); sys.exit(1)
+    else:
+        print("Type checker REPL (JSON s-expressions)")
+        print('Example: ["+", 1, 2]')
+        for line in sys.stdin:
+            line = line.strip()
+            if not line: continue
+            try:
+                expr = parse_expr(line)
+                t = check(expr, env)
+                print(f"  : {t}")
+            except Exception as e: print(f"  Error: {e}")
 
 if __name__ == "__main__": main()

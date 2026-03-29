@@ -1,9 +1,13 @@
-# Type Checker (Hindley-Milner)
+# Type Checker
 
-Type Checker (Hindley-Milner) — zero-dependency Python implementation.
+Type Checker — zero-dependency, single-file Python CLI.
 
 ## Usage
 
 ```bash
-python3 type_checker.py
+python3 type_checker.py --help
 ```
+
+## License
+
+MIT
