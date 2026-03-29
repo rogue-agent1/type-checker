@@ -1,13 +1,11 @@
-# Type Checker
+# type_checker
 
-Type Checker — zero-dependency, single-file Python CLI.
+type_checker - Bidirectional type checker with generics and union types.
+
+Zero-dependency, single-file Python CLI.
 
 ## Usage
 
 ```bash
-python3 type_checker.py --help
+python3 type_checker.py
 ```
-
-## License
-
-MIT

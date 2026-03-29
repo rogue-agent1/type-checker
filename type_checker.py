@@ -1,111 +1,137 @@
 #!/usr/bin/env python3
-"""Simple type checker for a mini typed language."""
-import sys
+"""type_checker - Bidirectional type checker with generics and union types."""
+import sys, json
+from dataclasses import dataclass, field
+from typing import Any, Optional
 
-class Type:
-    def __init__(self, name, params=None): self.name = name; self.params = params or []
-    def __eq__(self, o): return isinstance(o, Type) and self.name == o.name and self.params == o.params
-    def __repr__(self):
-        if self.name == "->": return f"({self.params[0]} -> {self.params[1]})"
-        if self.params: return f"{self.name}<{', '.join(map(str, self.params))}>"
-        return self.name
+@dataclass
+class TType:
+    pass
 
-INT = Type("Int"); FLOAT = Type("Float"); BOOL = Type("Bool"); STRING = Type("String"); VOID = Type("Void")
+@dataclass
+class TInt(TType):
+    def __repr__(self): return "Int"
 
-def fn_type(a, b): return Type("->", [a, b])
+@dataclass
+class TStr(TType):
+    def __repr__(self): return "Str"
 
-class TypeEnv:
-    def __init__(self, parent=None): self.bindings = {}; self.parent = parent
-    def bind(self, name, t): self.bindings[name] = t
-    def lookup(self, name):
-        if name in self.bindings: return self.bindings[name]
-        if self.parent: return self.parent.lookup(name)
-        raise TypeError(f"Unbound: {name}")
-    def child(self): return TypeEnv(self)
+@dataclass
+class TBool(TType):
+    def __repr__(self): return "Bool"
 
-def check(expr, env):
-    if isinstance(expr, int): return INT
-    if isinstance(expr, float): return FLOAT
-    if isinstance(expr, bool): return BOOL
-    if isinstance(expr, str) and expr.startswith('"'): return STRING
-    if isinstance(expr, str): return env.lookup(expr)
-    if not isinstance(expr, list) or not expr: raise TypeError(f"Bad expr: {expr}")
-    head = expr[0]
-    if head == "let":
-        name, val_expr, body = expr[1], expr[2], expr[3]
-        val_type = check(val_expr, env)
-        new_env = env.child(); new_env.bind(name, val_type)
-        return check(body, new_env)
-    if head == "lambda":
-        param, param_type_str, body = expr[1], expr[2], expr[3]
-        param_type = parse_type(param_type_str)
-        new_env = env.child(); new_env.bind(param, param_type)
-        ret_type = check(body, new_env)
-        return fn_type(param_type, ret_type)
-    if head == "if":
-        cond_t = check(expr[1], env)
-        if cond_t != BOOL: raise TypeError(f"If condition must be Bool, got {cond_t}")
-        then_t = check(expr[2], env)
-        else_t = check(expr[3], env)
-        if then_t != else_t: raise TypeError(f"Branch mismatch: {then_t} vs {else_t}")
-        return then_t
-    if head in ("+", "-", "*", "/"):
-        lt, rt = check(expr[1], env), check(expr[2], env)
-        if lt == INT and rt == INT: return INT
-        if lt in (INT, FLOAT) and rt in (INT, FLOAT): return FLOAT
-        raise TypeError(f"Arithmetic on {lt}, {rt}")
-    if head in ("==", "!=", "<", ">", "<=", ">="):
-        check(expr[1], env); check(expr[2], env); return BOOL
-    if head in ("and", "or"):
-        lt, rt = check(expr[1], env), check(expr[2], env)
-        if lt != BOOL or rt != BOOL: raise TypeError(f"Logic on {lt}, {rt}")
-        return BOOL
-    if head == "not":
-        t = check(expr[1], env)
-        if t != BOOL: raise TypeError(f"Not on {t}")
-        return BOOL
-    # Function application
-    fn_t = check(expr[0], env)
-    if fn_t.name != "->": raise TypeError(f"Not a function: {fn_t}")
-    arg_t = check(expr[1], env)
-    if arg_t != fn_t.params[0]: raise TypeError(f"Expected {fn_t.params[0]}, got {arg_t}")
-    return fn_t.params[1]
+@dataclass
+class TFunc(TType):
+    params: list
+    ret: 'TType'
+    def __repr__(self): return f"({', '.join(map(str,self.params))}) -> {self.ret}"
 
-def parse_type(s):
-    s = s.strip()
-    if s == "Int": return INT
-    if s == "Float": return FLOAT
-    if s == "Bool": return BOOL
-    if s == "String": return STRING
-    if "->" in s:
-        parts = s.split("->", 1)
-        return fn_type(parse_type(parts[0]), parse_type(parts[1]))
-    return Type(s)
+@dataclass
+class TGeneric(TType):
+    name: str
+    bound: Optional['TType'] = None
+    def __repr__(self): return f"<{self.name}>"
 
-def parse_expr(s):
-    import json
-    return json.loads(s)
+@dataclass
+class TUnion(TType):
+    types: list
+    def __repr__(self): return " | ".join(map(str, self.types))
+
+@dataclass
+class TList(TType):
+    elem: 'TType'
+    def __repr__(self): return f"List[{self.elem}]"
+
+class TypeChecker:
+    def __init__(self):
+        self.env = {}
+        self.errors = []
+        self.substitutions = {}
+    
+    def unify(self, a, b):
+        a, b = self.resolve(a), self.resolve(b)
+        if isinstance(a, TGeneric):
+            self.substitutions[a.name] = b; return b
+        if isinstance(b, TGeneric):
+            self.substitutions[b.name] = a; return a
+        if type(a) == type(b):
+            if isinstance(a, (TInt, TStr, TBool)): return a
+            if isinstance(a, TFunc):
+                if len(a.params) != len(b.params):
+                    self.errors.append(f"Arity mismatch: {a} vs {b}"); return a
+                params = [self.unify(p1, p2) for p1, p2 in zip(a.params, b.params)]
+                ret = self.unify(a.ret, b.ret)
+                return TFunc(params, ret)
+            if isinstance(a, TList):
+                return TList(self.unify(a.elem, b.elem))
+        if isinstance(a, TUnion):
+            if self.is_subtype(b, a): return a
+        if isinstance(b, TUnion):
+            if self.is_subtype(a, b): return b
+        self.errors.append(f"Cannot unify {a} with {b}")
+        return a
+    
+    def resolve(self, t):
+        if isinstance(t, TGeneric) and t.name in self.substitutions:
+            return self.resolve(self.substitutions[t.name])
+        return t
+    
+    def is_subtype(self, a, b):
+        a, b = self.resolve(a), self.resolve(b)
+        if type(a) == type(b) and isinstance(a, (TInt, TStr, TBool)): return True
+        if isinstance(b, TUnion): return any(self.is_subtype(a, t) for t in b.types)
+        if isinstance(a, TGeneric) or isinstance(b, TGeneric): return True
+        return False
+    
+    def check_expr(self, expr):
+        if isinstance(expr, int): return TInt()
+        if isinstance(expr, str) and expr.startswith('"'): return TStr()
+        if isinstance(expr, bool): return TBool()
+        if isinstance(expr, str):
+            if expr in self.env: return self.env[expr]
+            self.errors.append(f"Undefined: {expr}"); return TInt()
+        if isinstance(expr, dict):
+            if "call" in expr:
+                ft = self.check_expr(expr["call"])
+                ft = self.resolve(ft)
+                if isinstance(ft, TFunc):
+                    args = [self.check_expr(a) for a in expr.get("args", [])]
+                    for p, a in zip(ft.params, args): self.unify(p, a)
+                    return self.resolve(ft.ret)
+                self.errors.append(f"Not callable: {ft}"); return TInt()
+            if "let" in expr:
+                val_t = self.check_expr(expr["val"])
+                self.env[expr["let"]] = val_t
+                return self.check_expr(expr["body"])
+            if "list" in expr:
+                elems = [self.check_expr(e) for e in expr["list"]]
+                if elems: return TList(elems[0])
+                return TList(TGeneric("?"))
+        return TInt()
 
 def main():
-    env = TypeEnv()
-    env.bind("print", fn_type(STRING, VOID))
-    env.bind("toString", fn_type(INT, STRING))
-    if len(sys.argv) > 1:
-        expr = parse_expr(" ".join(sys.argv[1:]))
-        try:
-            t = check(expr, env)
-            print(f"Type: {t}")
-        except TypeError as e: print(f"Type error: {e}", file=sys.stderr); sys.exit(1)
+    tc = TypeChecker()
+    tc.env["add"] = TFunc([TInt(), TInt()], TInt())
+    tc.env["concat"] = TFunc([TStr(), TStr()], TStr())
+    tc.env["id"] = TFunc([TGeneric("T")], TGeneric("T"))
+    
+    tests = [
+        ({"call": "add", "args": [1, 2]}, "add(1, 2)"),
+        ({"call": "concat", "args": ['"a"', '"b"']}, 'concat("a", "b")'),
+        ({"call": "id", "args": [42]}, "id(42)"),
+        ({"let": "x", "val": 10, "body": {"call": "add", "args": ["x", 5]}}, "let x=10 in add(x,5)"),
+        ({"list": [1, 2, 3]}, "[1, 2, 3]"),
+    ]
+    
+    for expr, desc in tests:
+        tc.substitutions.clear()
+        t = tc.check_expr(expr)
+        print(f"  {desc} : {t}")
+    
+    if tc.errors:
+        print(f"\nErrors: {tc.errors}")
     else:
-        print("Type checker REPL (JSON s-expressions)")
-        print('Example: ["+", 1, 2]')
-        for line in sys.stdin:
-            line = line.strip()
-            if not line: continue
-            try:
-                expr = parse_expr(line)
-                t = check(expr, env)
-                print(f"  : {t}")
-            except Exception as e: print(f"  Error: {e}")
+        print("\nAll checks passed!")
 
-if __name__ == "__main__": main()
+if __name__ == "__main__":
+    main()
